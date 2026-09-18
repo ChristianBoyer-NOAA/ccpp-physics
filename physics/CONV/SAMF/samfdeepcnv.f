@@ -73,20 +73,23 @@
 !!  -# For the "feedback control", calculate updated values of the state variables by multiplying the cloud base mass flux and the tendencies calculated per unit cloud base mass flux from the static control.
 !!
 !!  \section samfdeep_detailed GFS samfdeepcnv Detailed Algorithm
-      subroutine samfdeepcnv_run (im,km,nn,first_time_step,restart,     &
+      subroutine samfdeepcnv_run (im,km,first_time_step,restart,        &
      &    tmf,qmicro,itc,ntc,cliq,cp,cvap,                              &
      &    eps,epsm1,fv,grav,hvap,rd,rv,                                 &
-     &    t0c,delt,ntk,ntr,delp, ten_t, ten_u, ten_v, ten_q,            &
-     &    prslp,psp,phil,tkeh,qtr,dqtr,prevsq,q,q1,t1,u1,v1,fscav,      &
-     &    hwrf_samfdeep,progsigma,progomega,cldwrk,rn,kbot,ktop,kcnv,   &
+     &    t0c,delt,ntk,ntr,delp,                                        &
+     &    prslp,psp,phil,tkeh,qtr,prevsq,q,q1,t1,u1,v1,fscav,           &
+!The following variables are for Leonard term
+     &    leo_u,leo_v,leo_t,leo_q,leonard,leofac,                       &
+     &    hwrf_samfdeep,progsigma,progomega,cldwrk,rn,                  &
+     &    kbot,ktop,kcnvtop,kcnv,                                       &
      &    islimsk,garea,dot,ncloud,hpbl,ud_mf,dd_mf,dt_mf,cnvw,cnvc,    &
      &    QLCN, QICN, w_upi, cf_upi, CNV_MFD,                           &
      &    CNV_DQLDT,CLCN,CNV_FICE,CNV_NDROP,CNV_NICE,mp_phys,mp_phys_mg,&
      &    clam,c0s,c1,betal,betas,evef,pgcon,asolfac,cscale,            &
      &    do_ca, ca_closure, ca_entr, ca_trigger, nthresh,ca_deep,      &
      &    rainevap,sigmain,sigmaout,omegain,omegaout,betadcu,betamcu,   &
-     &    betascu,lbb1,lbb2,lbb3,dt_decay,maxMF,do_mynnedmf,            &
-     &    sigmab_coldstart,cat_adj_deep,                                &
+     &    betascu,maxMF,do_mynnedmf,sigmab_coldstart,                   &
+     &    coldpool,buoyexcsgrs,buoyexcs,ucp,vcp,aux3d,                  &
      &    errmsg,errflg)
 
 !
@@ -95,49 +98,64 @@
 
       implicit none
 !
-      integer, intent(in)  :: im, km, nn, itc, ntc, ntk, ntr, ncloud
+      integer, intent(in)  :: im, km, itc, ntc, ntk, ntr, ncloud
       integer, intent(in)  :: islimsk(:)
       real(kind=kind_phys), intent(in) :: cliq, cp, cvap, eps, epsm1,   &
      &   fv, grav, hvap, rd, rv, t0c
       real(kind=kind_phys), intent(in) ::  delt, cscale
       real(kind=kind_phys), intent(in) :: psp(:), delp(:,:),            &
-     &   prslp(:,:),  garea(:), hpbl(:), dot(:,:), phil(:,:) 
+     &   prslp(:,:),  garea(:), hpbl(:), dot(:,:), phil(:,:)
       real(kind=kind_phys), dimension(:), intent(in) :: fscav
       logical, intent(in)  :: first_time_step,restart,hwrf_samfdeep,    &
-     &     progsigma,progomega,do_mynnedmf,sigmab_coldstart
+     &     progsigma,progomega,do_mynnedmf,sigmab_coldstart,coldpool
       real(kind=kind_phys), intent(in) :: nthresh,betadcu,betamcu,      &
-     &     betascu,lbb1,lbb2,lbb3,dt_decay
+     &                                    betascu
       real(kind=kind_phys), intent(in), optional :: ca_deep(:)
       real(kind=kind_phys), intent(in), optional :: sigmain(:,:),       &
      &     qmicro(:,:),  prevsq(:,:), omegain(:,:)
       real(kind=kind_phys), intent(in) :: tmf(:,:,:),q(:,:)
       real(kind=kind_phys), dimension (:), intent(in), optional :: maxMF
       real(kind=kind_phys), intent(out) :: rainevap(:)
-      real(kind=kind_phys), intent(inout), optional :: sigmaout(:,:),     &
+      real(kind=kind_phys), intent(inout), optional :: sigmaout(:,:),   &
      &     omegaout(:,:)
+!
+! for cold pool
+!
+      real(kind=kind_phys), intent(in), optional :: buoyexcsgrs(:,:)
+      real(kind=kind_phys), intent(inout), optional :: buoyexcs(:,:)
+      real(kind=kind_phys), intent(out), optional :: aux3d(:,:,:)
+      real(kind=kind_phys), intent(out) :: ucp(:), vcp(:)
+!
       logical, intent(in)  :: do_ca,ca_closure,ca_entr,ca_trigger
-      integer, intent(inout)  :: kcnv(:)
       ! DH* TODO - check dimensions of qtr, ntr+2 correct?  *DH
-      real(kind=kind_phys), intent(inout) :: cnvw(:,:),  cnvc(:,:),     &
-     &                                       tkeh(:,:)
-      
-      real(kind=kind_phys), intent(in) :: qtr(:,:,:), q1(:,:)
-      real(kind=kind_phys), intent(in) :: t1(:,:), u1(:,:), v1(:,:)
+      real(kind=kind_phys), intent(inout) ::   qtr(:,:,:),              &
+     &   q1(:,:), t1(:,:),   u1(:,:), v1(:,:),                          &
+     &   cnvw(:,:),  cnvc(:,:), tkeh(:,:)
+! for Leonard term
+      logical, intent(in)  :: leonard !flag for leonard term
+      real(kind=kind_phys), intent(in) :: leofac  !parameter for Leonard term
+      real(kind=kind_phys), intent(in) ::
+     &                     leo_u(:,:),  leo_v(:,:),                     &
+     &                     leo_t(:,:),  leo_q(:,:,:)
 
-      integer, intent(out) :: kbot(:), ktop(:)
+      integer, intent(inout) :: kbot(:), ktop(:), kcnvtop(:), kcnv(:)
       real(kind=kind_phys), intent(out) :: cldwrk(:),                   &
      &   rn(:),                                                         &
      &   dd_mf(:,:), dt_mf(:,:)
       real(kind=kind_phys), intent(out) :: ud_mf(:,:)
+      ! GJF* These variables are conditionally allocated depending on whether the
+      !     Morrison-Gettelman microphysics is used, so they must be declared 
+      !     using assumed shape.
       real(kind=kind_phys), dimension(:,:), intent(inout), optional ::  &
      &   qlcn, qicn, w_upi, cnv_mfd, cnv_dqldt, clcn                    &
      &,  cnv_fice, cnv_ndrop, cnv_nice, cf_upi
+      ! *GJF
       integer, intent(in) :: mp_phys, mp_phys_mg
 
       real(kind=kind_phys), intent(in) :: clam,  c0s,  c1,              &
      &                     betal,   betas,   asolfac,                   &
      &                     evef,  pgcon
-      real(kind_phys), intent(in) :: cat_adj_deep
+
       character(len=*), intent(out) :: errmsg
       integer,          intent(out) :: errflg
 !
@@ -214,15 +232,33 @@ cj
      &                     tkcrt,   cmxfac
 cj
 !
-!  parameters for diagnostic updraft velocity calculation
+!  parameters for updraft velocity calculation
       real(kind=kind_phys) bb1, bb2, csmf, wucb
 !
 !  parameters for prognostic sigma closure                                                                                                                                                      
       real(kind=kind_phys) omega_u(im,km),zdqca(im,km),tmfq(im,km),
-     &     omegac(im),zeta(im,km),dbyo1(im,km),sigmab(im),qadv(im,km)
-      real(kind=kind_phys) gravinv,invdelt,sigmind,sigminm,sigmins,
-     &     wc_min, wc_eff 
+     &     omegac(im),zeta(im,km),dbyo1(im,km),sigmab(im),qadv(im,km),
+     &     tentr(im,km)
+      real(kind=kind_phys) gravinv,invdelt,sigmind,sigminm,sigmins
+      parameter(sigmind=0.01,sigmins=0.03,sigminm=0.01)
       logical flag_shallow, flag_mid
+!
+!  parameters for cold pool parameterization
+!
+      integer kdcp(im), kdcp1(im), kc(im)
+      real(kind=kind_phys) dd_detmf(im,km-1), dbyoc(im,km-1),
+     &     dellabu(im,km-1), bumax(im), vgf(im), wgke(im),
+     &     ukdcp(im), vkdcp(im), wskdcp(im)
+      real(kind=kind_phys) taucp, frdn, hcp, buxcr
+      real(kind=kind_phys) cpfac, wgfac
+      logical cptrig(im)
+!
+!    parameters for leonard term
+      real(kind=kind_phys) leodx1,leodx2,leodx3,leodx4
+      real(kind=kind_phys) saleofac(im)
+!     parameter(leodx1=20000.,leodx2=1500.,leodx3=500.,leodx4=50.)
+      parameter(leodx1=20000.,leodx2=2000.,leodx3=500.,leodx4=50.)
+
 c  physical parameters
 !     parameter(grav=grav,asolfac=0.958)
 !     parameter(elocp=hvap/cp,el2orc=hvap*hvap/(rv*cp))
@@ -250,6 +286,8 @@ c  physical parameters
       parameter(bb1=4.0,bb2=0.8,csmf=0.2)
       parameter(tkcrt=2.,cmxfac=15.)
       parameter(betaw=.03)
+      parameter(taucp=7200.,frdn=0.45)
+      parameter(cpfac=1.0,wgfac=2.0,hcp=500.,buxcr=100.)
 
 !
 !  local variables and arrays
@@ -285,7 +323,8 @@ c  cloud water
      &                     eta(im,km),     etad(im,km),   zi(im,km),
      &                     qrcko(im,km),   qrcdo(im,km),
      &                     pwo(im,km),     pwdo(im,km),   c0t(im,km),
-     &                     tx1(im),        sumx(im),      cnvwt(im,km)
+     &                     tx1(im),        sumx(im),      sumy(im),
+     &                     cnvwt(im,km)
      &,                    rhbar(im)
 !
 !  variables for Total Variation Diminishing (TVD) flux-limiter scheme
@@ -311,24 +350,6 @@ c     data acritt/.203,.515,.521,.566,.625,.665,.659,.688,
 c    &            .743,.813,.886,.947,1.138,1.377,1.896/
       real(kind=kind_phys) tf, tcr, tcrf
       parameter (tf=233.16, tcr=263.16, tcrf=1.0/(tcr-tf))
-
-      real(kind=kind_phys), intent(out) :: ten_t(:,:), ten_u(:,:),      &
-     & ten_v(:,:), ten_q(:,:,:), dqtr(:,:,:)
-
-      real(kind=kind_phys) :: new_t1(im,km),new_u1(im,km),new_v1(im,km),&
-     & new_q1(im,km),new_qtr(im,km,nn)
-
-      ten_t = 0._kind_phys
-      ten_u = 0._kind_phys
-      ten_v = 0._kind_phys
-      ten_q = 0._kind_phys
-      dqtr  = 0._kind_phys
-
-      new_t1 = t1 
-      new_u1 = u1 
-      new_v1 = v1
-      new_q1 = q1
-      new_qtr = qtr
 
       ! Initialize CCPP error handling variables
       errmsg = ''
@@ -363,21 +384,6 @@ c-----------------------------------------------------------------------
 !************************************************************************
 !
 !
-!   - Initialize parameters related to prognostic closure
-      if (progsigma) then
-         if (progomega) then
-            sigmind  = 0.03
-            sigmins  = 0.03
-            sigminm = 0.03
-            wc_min = 0.2
-         else
-            sigmind  = 0.01
-            sigmins  = 0.03
-            sigminm = 0.03
-            wc_min = 0.2
-         endif
-      endif
-      
       km1 = km - 1
 !>  - Initialize column-integrated and other single-value-per-column variable arrays.
 c
@@ -397,6 +403,7 @@ c
         mbdt(i)=10.
         kbot(i)=km+1
         ktop(i)=0
+        kcnvtop(i)=0
         kbcon(i)=km
         ktcon(i)=1
         ktconn(i)=1
@@ -425,8 +432,29 @@ c
         rainevap(i) = 0.
         omegac(i)=0.
         gdx(i) = sqrt(garea(i))
+        saleofac(i) = 0.
       enddo
-
+!
+!>  - Compute scale dependent leonard factor (\p saleofac)
+!
+      if(leonard) then
+        do i=1,im
+          if(gdx(i) >= leodx1 .or. gdx(i) <= leodx4) then
+            saleofac(i) = 0.
+          else if(gdx(i) < leodx1 .and. gdx(i) > leodx2) then
+!           tem = leodx2 / gdx(i)
+            tem = (leodx2 / gdx(i))**2.0
+            saleofac(i) = leofac * tem
+          else if(gdx(i) < leodx3 .and. gdx(i) > leodx4) then
+!           tem = gdx(i) / leodx3
+            tem = (gdx(i) / leodx3)**2.0
+            saleofac(i) = leofac * tem
+          else if(gdx(i) < leodx2 .and. gdx(i) > leodx3) then
+            saleofac(i) = leofac
+          endif
+        enddo
+      endif
+!
       do k=1,km
         do i=1,im
           xlamud(i,k) = 0.
@@ -470,6 +498,24 @@ c
           cnvc(i,k) = 0.
         enddo
       enddo
+!
+!   initialize cold pool variables for cold pool parameterization
+      do i = 1, im
+        vgf(i) = 0.
+        wgke(i) = 0.
+        ucp(i) = 0.
+        vcp(i) = 0.
+        cptrig(i) = .false.
+        kdcp(i) = 0
+      enddo
+      do k = 1, km1
+        do i = 1, im
+          dd_detmf(i,k) = 0.
+          dellabu(i,k) = 0.
+          dbyoc(i,k) = 0.
+        enddo
+      enddo
+!
 ! hchuang code change
 !>  - Initialize updraft and downdraft mass fluxes to zero.
       do k = 1, km
@@ -586,6 +632,75 @@ c
         enddo
         enddo
       endif
+!
+!  determine cold pool depth with downdraft buoyancy excess for cold pool parameterization
+      if(coldpool)then
+!
+        if(first_time_step .and. .not.restart)then
+          do k = 1,km
+            do i = 1,im
+              buoyexcs(i,k) = 0.
+            enddo
+          enddo
+        else
+!
+          do k = 1,km
+            do i = 1,im
+              tem = 1.5 * hcp
+!             if(zo(i,k) < hcp) then
+              if(zo(i,k) < tem) then
+                buoyexcs(i,k) = max(buoyexcsgrs(i,k), 0.)
+              else
+                buoyexcs(i,k) = 0.
+              endif
+            enddo
+          enddo
+          do k = 1, km1
+            do i=1,im
+              if(zo(i,k)<hcp) then
+                kdcp(i) = k
+              endif
+            enddo
+          enddo
+          do i=1,im
+            bumax(i) = buoyexcs(i,1)
+            kc(i) = 1
+          enddo
+          do k = 2, km1
+            do i=1,im
+              if(k <= kdcp(i)) then
+                if(buoyexcs(i,k) > bumax(i)) then
+                  kc(i)   = k
+                  bumax(i) = buoyexcs(i,k)
+                endif
+              endif
+            enddo
+          enddo
+!
+          do i=1,im
+            flg(i) = .true.
+            kdcp1(i) = 0
+            if(bumax(i) < buxcr) flg(i) = .false.
+          enddo
+          do k = 1, km1
+            do i=1,im
+              if(flg(i) .and. (k>=kc(i) .and. k<=kdcp(i))) then
+                if(buoyexcs(i,k) >= buxcr) then
+                  kdcp1(i) = k
+                endif
+              endif
+            enddo
+          enddo
+          do i=1,im
+            if(kdcp1(i) > 0) then
+              cptrig(i) = .true.
+              kdcp(i) = kdcp1(i)
+            endif
+          enddo
+!
+        endif
+!
+      endif
 c
 c!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
 c   convert surface pressure to mb from cb
@@ -639,7 +754,103 @@ c
             zeta(i,k)=1.0
          enddo
       enddo
-
+!
+! estimate vertical velocity at the leading edge of cold pool,
+!   cold pool propagation speed, 
+!   and compute its kinetic energy (wgke)
+!
+      if(coldpool)then
+!
+        do i=1,im
+          sumx(i) = 0.
+          sumy(i) = 0.
+          ukdcp(i) = 0.
+          vkdcp(i) = 0.
+        enddo
+        do k = 1, km1
+          do i = 1, im
+            if(cptrig(i) .and. k <= kdcp(i)) then
+              if(k == 1) then
+                dz = zi(i,1)
+              else
+                dz = zi(i,k) - zi(i,k-1)
+              endif
+              tem = 0.01 * fpvs(t1(i,k))      ! fpvs is in pa
+              tem1 = eps * tem / (pfld(i,k) + epsm1*tem)
+              val1 = 1.e-8
+              tem1 = max(tem1, val1)
+              gamma = el2orc * tem1 / (t1(i,k)**2)
+              rfact =  1. + fv * cp * gamma
+     &                 * t1(i,k) / hvap
+              sumx(i) = sumx(i) +
+     &                 dz * (grav / (cp * t1(i,k)))
+     &                 * buoyexcs(i,k) / (1. + gamma)
+     &                 * rfact
+              val = 0.
+              sumx(i) = sumx(i) +
+     &                 dz * grav * fv *
+     &                 max(val,(tem1 - q1(i,k)))
+!
+              ukdcp(i) = ukdcp(i) + u1(i,k) * dz
+              vkdcp(i) = vkdcp(i) + v1(i,k) * dz
+              sumy(i) = sumy(i) + dz
+!
+            endif
+          enddo
+        enddo
+        do i=1,im
+          wskdcp(i) = 0.
+        enddo
+        do i = 1, im
+          if(cptrig(i)) then
+            if(sumy(i) <= 0.) then
+              cptrig(i) = .false.
+            else
+              ukdcp(i)=ukdcp(i)/sumy(i)
+              vkdcp(i)=vkdcp(i)/sumy(i)
+              wskdcp(i)=sqrt(ukdcp(i)*ukdcp(i)+vkdcp(i)*vkdcp(i))
+            endif
+          endif
+        enddo
+!
+        do i=1,im
+          if(cptrig(i)) then
+            k = kdcp(i)
+            sumx(i) = max(sumx(i), 0.)
+            vgf(i) = frdn* sqrt(sumx(i))
+!
+!           ptem = 0.707 * gdx(i) / dt2
+            ptem = gdx(i) / dt2
+            tem = vgf(i) * ukdcp(i) / wskdcp(i)  
+            if (tem > 0.) then
+               ptem1 = ptem - ukdcp(i)
+               ptem1 = max(ptem1, 0.)
+               ucp(i) = min(tem, ptem1)
+            else
+               ptem1 = -ptem - ukdcp(i)
+               ptem1 = min(ptem1, 0.)
+               ucp(i) = max(tem, ptem1)
+            endif
+            tem1 = vgf(i) * vkdcp(i) / wskdcp(i)  
+            if (tem1 > 0.) then
+               ptem1 = ptem - vkdcp(i)
+               ptem1 = max(ptem1, 0.)
+               vcp(i) = min(tem1, ptem1)
+            else
+               ptem1 = -ptem - vkdcp(i)
+               ptem1 = min(ptem1, 0.)
+               vcp(i) = max(tem1, ptem1)
+            endif
+!           vgf(i) = sqrt(ucp(i)*ucp(i)+vcp(i)*vcp(i))
+!
+!           tem1 = 0.5 * vgf(i)
+            tem1 = wgfac * 0.7071 * vgf(i)
+!           print*,'ucp:vcp:vgf= ',ucp(i),vcp(i),vgf(i)
+            wgke(i) = 0.5 * tem1 * tem1
+          endif
+        enddo
+!
+      endif
 !
 !  initialize tracer variables
 !
@@ -728,6 +939,21 @@ c
           endif
         enddo
       enddo
+!
+! if cold pool depth is smaller than the convection initiation level, no cold pool trigger
+!
+!     if(coldpool)then
+!
+!       do i=1,im
+!         if(cptrig(i)) then
+!           if(kdcp(i) < kb(i)) then
+!             cptrig(i) = .false.
+!             wgke(i) = 0.
+!           endif
+!         endif
+!       enddo
+!
+!     endif
 c
 !> - Calculate the temperature, specific humidity, and pressure at interface levels.
       do k = 1, km1
@@ -795,7 +1021,9 @@ c
       do k = 1, km1
         do i=1,im
           if (flg(i) .and. k <= kbmax(i)) then
-            if(k > kb(i) .and. heo(i,kb(i)) > heso(i,k)) then
+            tem = heo(i,kb(i))
+            dbyo(i,k) = tem - heso(i,k)
+            if(k > kb(i) .and. tem > heso(i,k)) then
               kbcon(i) = k
               flg(i)   = .false.
             endif
@@ -808,14 +1036,53 @@ c
         if(kbcon(i) == kmax(i)) cnvflg(i) = .false.
       enddo
 !!
-      if(.not.progomega)then
-         totflg = .true.
-         do i=1,im
-            totflg = totflg .and. (.not. cnvflg(i))
-         enddo
-         if(totflg) return
+      if(.not.coldpool)then
+      totflg = .true.
+      do i=1,im
+        totflg = totflg .and. (.not. cnvflg(i))
+      enddo
+      if(totflg) return
       endif
 !!
+!
+!  if wgke is less than subcloud convective inhibition (cina), no cold pool trigger
+!
+      if(coldpool)then
+!
+      do k = 2, km1
+        do i = 1, im
+          if (cnvflg(i) .and. cptrig(i)) then
+            if(k > kb(i) .and. k < kbcon(i)) then
+              dz1 = zo(i,k+1) - zo(i,k)
+              gamma = el2orc * qeso(i,k) / (to(i,k)**2)
+              rfact =  1. + fv * cp * gamma
+     &                 * to(i,k) / hvap
+              cina(i) = cina(i) +
+     &                 dz1 * (grav / (cp * to(i,k)))
+     &                 * dbyo(i,k) / (1. + gamma)
+     &                 * rfact
+              val = 0.
+              cina(i) = cina(i) +
+     &                 dz1 * grav * fv *
+     &                 max(val,(qeso(i,k) - qo(i,k)))
+            endif
+          endif
+        enddo
+      enddo
+!
+      do i=1,im
+        if (cnvflg(i) .and. cptrig(i)) then
+          tem = min(cina(i), 0.)
+          ptem = -tem
+          if(wgke(i) < ptem) then
+            cptrig(i) = .false.
+            wgke(i) = 0.
+          endif
+        endif
+      enddo
+!
+      endif
+!
 !> - Determine the vertical pressure velocity at the LFC. After Han and Pan (2011) \cite han_and_pan_2011 , determine the maximum pressure thickness between a parcel's starting level and the LFC. If a parcel doesn't reach the LFC within the critical thickness, then the convective inhibition is deemed too great for convection to be triggered, and the subroutine returns to the calling routine without modifying the state variables.
       do i=1,im
         if(cnvflg(i)) then
@@ -828,7 +1095,7 @@ c   turn off convection if pressure depth between parcel source level
 c      and cloud base is larger than a critical value, cinpcr
 c
       do i=1,im
-        if(cnvflg(i)) then
+        if(cnvflg(i) .and. .not.cptrig(i)) then
           if(islimsk(i) == 1) then
             w1 = w1l
             w2 = w2l
@@ -868,13 +1135,13 @@ c
             if(kbcon(i) == kmax(i)) cnvflg(i) = .false.
          enddo
       endif
-
-      if(.not.progomega)then
-         totflg = .true.
-         do i=1,im
-            totflg = totflg .and. (.not. cnvflg(i))
-         enddo
-         if(totflg) return
+!!
+      if(.not.coldpool)then
+      totflg = .true.
+      do i=1,im
+        totflg = totflg .and. (.not. cnvflg(i))
+      enddo
+      if(totflg) return
       endif
 !!
 !
@@ -904,7 +1171,14 @@ c
       do k = 1, km1
         do i=1,im
           if (flg(i) .and. k <= kbmax(i)) then
-            if(k > kb(i) .and. heo(i,kb(i)) > heso(i,k)) then
+!           if(cptrig(i)) then
+!             kk = kb(i)
+!             tem = 0.5 * (buoyexcs(i,kk)+buoyexcs(i,kk+1))
+!             tem1 = heo(i,kb(i)) + tem
+!           else
+              tem1 = heo(i,kb(i))
+!           endif
+            if(k > kb(i) .and. tem1 > heso(i,k)) then
               kbcon(i) = k
               flg(i)   = .false.
             endif
@@ -924,13 +1198,13 @@ c
             if(kbcon(i) == kmax(i)) cnvflg(i) = .false.
          enddo
       endif
-
-      if(.not.progomega)then
-         totflg = .true.
-         do i=1,im
-            totflg = totflg .and. (.not. cnvflg(i))
-         enddo
-         if(totflg) return
+!!
+      if(.not.coldpool)then
+      totflg = .true.
+      do i=1,im
+        totflg = totflg .and. (.not. cnvflg(i))
+      enddo
+      if(totflg) return
       endif
 !!
       do i=1,im
@@ -948,7 +1222,7 @@ c
       enddo
       do k = 1, km1
         do i = 1, im
-          if (cnvflg(i)) then
+          if(cnvflg(i) .and. .not.cptrig(i)) then
             if(k >= kb(i) .and. k < kbcon(i)) then
               dz = zo(i,k+1) - zo(i,k)
               rhbar(i) = rhbar(i) + rh(i,k) * dz
@@ -958,7 +1232,7 @@ c
         enddo
       enddo
       do i= 1, im
-        if(cnvflg(i)) then
+        if(cnvflg(i) .and. .not.cptrig(i)) then
           rhbar(i) = rhbar(i) / sumx(i)
           if(rhbar(i) < rhcrt) then
             cnvflg(i) = .false.
@@ -972,13 +1246,13 @@ c
             if(kbcon(i) == kmax(i)) cnvflg(i) = .false.
          enddo
       endif
-
-      if(.not.progomega)then
-         totflg = .true.
-         do i=1,im
-            totflg = totflg .and. (.not. cnvflg(i))
-         enddo
-         if(totflg) return
+!!
+      if(.not.coldpool)then
+      totflg = .true.
+      do i=1,im
+        totflg = totflg .and. (.not. cnvflg(i))
+      enddo
+      if(totflg) return
       endif
 !!
 
@@ -1150,9 +1424,9 @@ c
         do i=1,im
           if(cnvflg(i).and.
      &      (k > kbcon(i) .and. k < kmax(i))) then
-              tem = qeso(i,k)/qeso(i,kbcon(i))
-              fent1(i,k) = min(tem**2, 3.0)
-              fent2(i,k) = min(tem**3, 5.2)
+              tem = min(qeso(i,k)/qeso(i,kbcon(i)), 1.)
+              fent1(i,k) = tem**2
+              fent2(i,k) = tem**3
           endif
         enddo
       enddo
@@ -1176,6 +1450,7 @@ c
         do i=1,im
           if(cnvflg(i) .and.
      &       (k > kbcon(i) .and. k < kmax(i))) then
+              tentr(i,k)=xlamue(i,k)*fent1(i,k)
               tem = cxlamet(i) * frh(i,k) * fent2(i,k)
               xlamue(i,k) = xlamue(i,k)*fent1(i,k) + tem
               tem1 = cxlamdt(i) * frh(i,k)
@@ -1236,7 +1511,12 @@ c
       do i = 1, im
         if(cnvflg(i)) then
           indx         = kb(i)
-          hcko(i,indx) = heo(i,indx)
+!         if(cptrig(i)) then
+!           tem = 0.5*(buoyexcs(i,indx)+buoyexcs(i,indx+1))
+!           hcko(i,indx) = heo(i,indx) + tem
+!         else
+            hcko(i,indx) = heo(i,indx)
+!         endif
           ucko(i,indx) = uo(i,indx)
           vcko(i,indx) = vo(i,indx)
           pwavo(i)     = 0.
@@ -1375,7 +1655,7 @@ c
         endif
       enddo
       do i=1,im
-        if(cnvflg(i)) then
+        if(cnvflg(i) .and. .not.cptrig(i)) then
           tem = pfld(i,kbcon(i)) - pfld(i,kbcon1(i))
           if(tem > dthk) then
              cnvflg(i) = .false.
@@ -1390,19 +1670,24 @@ c
             if(kbcon(i) == kmax(i)) cnvflg(i) = .false.
          enddo
       endif
-
-      if(.not.progomega)then
-         totflg = .true.
-         do i = 1, im
-            totflg = totflg .and. (.not. cnvflg(i))
-         enddo
-         if(totflg) return
+!!
+      if(.not.coldpool)then
+      totflg = .true.
+      do i = 1, im
+        totflg = totflg .and. (.not. cnvflg(i))
+      enddo
+      if(totflg) return
       endif
 !!
 c
 c  calculate convective inhibition
 c
 !> - Calculate additional trigger condition of the convective inhibition (CIN) according to Han et al.'s (2017) \cite han_et_al_2017 equation 13.
+      do i = 1, im
+        if(cnvflg(i)) then
+           cina(i) = 0.
+        endif
+      enddo
       do k = 2, km1
         do i = 1, im
           if (cnvflg(i)) then
@@ -1428,14 +1713,14 @@ c
 !> - Turn off convection if the CIN is less than a critical value (cinacr) which is inversely proportional to the large-scale vertical velocity.
       if(hwrf_samfdeep) then
        do i = 1, im
-        if(cnvflg(i)) then
+        if(cnvflg(i) .and. .not.cptrig(i)) then
           cinacr = cinacrmx
           if(cina(i) < cinacr) cnvflg(i) = .false.
         endif
        enddo
       else   !gfs_samfdeep
        do i = 1, im
-        if(cnvflg(i)) then
+        if(cnvflg(i) .and. .not.cptrig(i)) then
           if(islimsk(i) == 1) then
             w1 = w1l
             w2 = w2l
@@ -1473,13 +1758,13 @@ c
             if(kbcon(i) == kmax(i)) cnvflg(i) = .false.
          enddo
       endif
-
-      if(.not.progomega)then
-         totflg = .true.
-         do i=1,im
-            totflg = totflg .and. (.not. cnvflg(i))
-         enddo
-         if(totflg) return
+!!
+      if(.not.coldpool)then
+      totflg = .true.
+      do i=1,im
+        totflg = totflg .and. (.not. cnvflg(i))
+      enddo
+      if(totflg) return
       endif
 !!
 c
@@ -1511,20 +1796,20 @@ c
         endif
       enddo
 
-
+!!
       if(do_ca .and. ca_trigger)then
          do i=1,im
             if(ca_deep(i) > nthresh) cnvflg(i) = .true.
             if(kbcon(i) == kmax(i)) cnvflg(i) = .false.
          enddo
       endif
-
-      if(.not.progomega)then
-         totflg = .true.
-         do i=1,im
-            totflg = totflg .and. (.not. cnvflg(i))
-         enddo
-         if(totflg) return
+!!
+      if(.not.coldpool)then
+      totflg = .true.
+      do i=1,im
+        totflg = totflg .and. (.not. cnvflg(i))
+      enddo
+      if(totflg) return
       endif
 !!
 
@@ -1576,10 +1861,18 @@ c
 !> - Set cloud moisture property equal to the enviromental moisture at updraft starting level (kb).
       do i = 1, im
         if (cnvflg(i)) then
-!         aa1(i) = 0.
-          qcko(i,kb(i)) = qo(i,kb(i))
-          qrcko(i,kb(i)) = qo(i,kb(i))
-!         rhbar(i) = 0.
+!!        aa1(i) = 0.
+!         if(cptrig(i)) then
+!           k = kb(i)
+!           tem = 0.5*(buoyexcs(i,k)+buoyexcs(i,k+1))
+!           tem1 = tem / hvap
+!           qcko(i,kb(i)) = qo(i,kb(i)) + tem1
+!           qrcko(i,kb(i)) = qo(i,kb(i)) + tem1
+!         else
+            qcko(i,kb(i)) = qo(i,kb(i))
+            qrcko(i,kb(i)) = qo(i,kb(i))
+!         endif
+!!        rhbar(i) = 0.
         endif
       enddo
 !> - Calculate the moisture content of the entraining/detraining parcel (qcko) and the value it would have if just saturated (qrch), according to equation A.14 in Grell (1993) \cite grell_1993 . Their difference is the amount of convective cloud water (qlk = rain + condensate). Determine the portion of convective cloud water that remains suspended and the portion that is converted into convective precipitation (pwo). Calculate and save the negative cloud work function (aa1) due to water loading. The liquid water in the updraft layer is assumed to be detrained from the layers above the level of the minimum moist static energy into the grid-scale cloud water (dellal).
@@ -1712,18 +2005,18 @@ c
         if(cnvflg(i) .and. aa1(i) <= 0.) cnvflg(i) = .false.
       enddo
 !!
-      if(.not.progomega)then
-         totflg = .true.
-         do i=1,im
-            totflg = totflg .and. (.not. cnvflg(i))
-         enddo
-         if(totflg) return
+      if(.not.coldpool)then
+      totflg = .true.
+      do i=1,im
+        totflg = totflg .and. (.not. cnvflg(i))
+      enddo
+      if(totflg) return
       endif
 !!
 c
-c  Estimate the convective overshooting as the level
+c  estimate the onvective overshooting as the level
 c    where the [aafac * cloud work function] becomes zero,
-c    which is the final cloud top.
+c    which is the final cloud top
 c
 !> - Continue calculating the cloud work function past the point of neutral buoyancy to represent overshooting according to Han and Pan (2011) \cite han_and_pan_2011 . Convective overshooting stops when \f$ cA_u < 0\f$ where \f$c\f$ is currently 10%, or when 10% of the updraft cloud work function has been consumed by the stable buoyancy force.
       do i = 1, im
@@ -1822,23 +2115,42 @@ c
                k = kbcon1(i)
                tem = po(i,k) / (rd * to(i,k))
                wucb = -0.01 * dot(i,k) / (tem * grav)
-               if(wucb.gt.0.) then
-                  wu2(i,k) = wucb * wucb
+               if(wucb > 0.) then
+!                if(cptrig(i)) then
+!                  wu2(i,k) = wucb * wucb + 2. * wgke(i)
+!                else
+                   wu2(i,k) = wucb * wucb
+!                endif
                else
-                  wu2(i,k) = 0.
+!                if(cptrig(i)) then
+!                  wu2(i,k) = 2. *wgke(i)
+!                else
+                   wu2(i,k) = 0.
+!                endif
                endif
             endif
          enddo
+      else
+        do i = 1, im
+          if (cnvflg(i)) then
+            k = kbcon1(i)
+!           if(cptrig(i)) then
+!             wu2(i,k) = 2. *wgke(i)
+!           else
+              wu2(i,k) = 0.
+!           endif
+          endif
+        enddo
       endif
 !                  
       if (progomega) then
          call progomega_calc(first_time_step,restart,im,km,
      &        kbcon1,ktcon,omegain,delt,del,zi,cnvflg,omegaout,
-     &        grav,buo,drag,wush,lbb1,lbb2,lbb3,dt_decay)
+     &        grav,buo,drag,wush,tentr,bb1,bb2)
          do k = 1, km
             do i = 1, im
                if (cnvflg(i)) then
-                  if(k >= kbcon1(i) .and. k < ktcon(i)) then
+                  if(k > kbcon1(i) .and. k < ktcon(i)) then
                      omega_u(i,k)=omegaout(i,k)
                      omega_u(i,k)=MAX(omega_u(i,k),-80.)
 !     Convert to m/s for use in convective time-scale:
@@ -1924,7 +2236,7 @@ c
          do k = 2, km1
             do i = 1, im
                if (cnvflg(i)) then
-                  if(k >= kbcon1(i) .and. k < ktcon(i)) then
+                  if(k > kbcon1(i) .and. k < ktcon(i)) then
                      dp = 1000. * del(i,k)
                      tem = 0.5 * (omega_u(i,k) + omega_u(i,k-1))
                      omegac(i) = omegac(i) + tem * dp
@@ -2085,8 +2397,8 @@ c
 !> - Calculate the normalized downdraft mass flux from equation 1 of Pan and Wu (1995) \cite pan_and_wu_1995 . Downdraft entrainment and detrainment rates are constants from the downdraft origination to the level of 60mb above the ground surface (kd94).
       do k = km1, 1, -1
         do i = 1, im
-          if (cnvflg(i) .and. k <= kmax(i)-1) then
-           if(k < jmin(i) .and. k >= kd94(i)) then
+          if (cnvflg(i) .and. k < jmin(i)) then
+           if(k >= kd94(i)) then
               dz        = zi(i,k+1) - zi(i,k)
               ptem      = xlamddt(i) - xlamdet(i)
               etad(i,k) = etad(i,k+1) * (1. - ptem * dz)
@@ -2098,6 +2410,38 @@ c
           endif
         enddo
       enddo
+!
+! compute downdraft detrainment mass flux
+! for downdraft buoyancy excess term in cold pool parameterization
+!
+      if(coldpool)then
+!
+        do k = km1, 2, -1
+          do i = 1, im
+            if (cnvflg(i) .and. k < jmin(i)) then
+              if(k >= kd94(i)) then
+                dz = zi(i,k) - zi(i,k-1)
+                ptem = 0.5 * (etad(i,k-1) + etad(i,k))
+                dd_detmf(i,k) = xlamddt(i) * ptem * dz
+              else if(k < kd94(i)) then
+                dz = zi(i,k) - zi(i,k-1)
+                tem = xlamd(i) + xlamddt(i)
+                ptem = 0.5 * (etad(i,k-1) + etad(i,k))
+                dd_detmf(i,k) = tem * ptem * dz
+              endif
+            endif
+          enddo
+        enddo
+        do i = 1, im
+          if (cnvflg(i)) then
+            dz = zi(i,1)
+            tem = xlamd(i) + xlamddt(i)
+            ptem = 0.5 * etad(i,1)
+            dd_detmf(i,1) = tem * ptem * dz
+          endif
+        enddo
+!
+      endif
 c
 c--- downdraft moisture properties
 c
@@ -2141,6 +2485,7 @@ cj
               hcdo(i,k) = ((1.-tem1)*hcdo(i,k+1)+tem*0.5*
      &                     (heo(i,k)+heo(i,k+1)))/factor
               dbyo(i,k) = hcdo(i,k) - heso(i,k)
+              dbyoc(i,k) = hcdo(i,k) - heo(i,k)
 !
               tem  = 0.5 * cm * tem
               factor = 1. + tem
@@ -2214,6 +2559,33 @@ c
           endif
         endif
       enddo
+!
+! compute the source term for downdraft buyoyancy excess
+!
+      if(coldpool)then
+!
+        do k = 2, km1
+          do i = 1, im
+            if (cnvflg(i) .and. k < jmin(i)) then
+              dp = 1000. * del(i,k)
+              factor = grav / dp
+              tem = 0.5 * (dbyoc(i,k-1) + dbyoc(i,k))
+              dellabu(i,k) = edto(i)*dd_detmf(i,k)*tem*factor
+              dellabu(i,k) = min(dellabu(i,k), 0.)
+            endif
+          enddo
+        enddo
+        do i = 1, im
+          if (cnvflg(i)) then
+            dp = 1000. * del(i,1)
+            factor = grav / dp
+            tem = 0.5 * dbyoc(i,1)
+            dellabu(i,1) = edto(i)*dd_detmf(i,1)*tem*factor
+            dellabu(i,1) = min(dellabu(i,1), 0.)
+          endif
+        enddo
+!
+      endif
 c
 c--- downdraft cloudwork functions
 c
@@ -2245,13 +2617,13 @@ c
         endif
       enddo
 !!
-
+      if(.not.coldpool)then
       totflg = .true.
       do i=1,im
-         totflg = totflg .and. (.not. cnvflg(i))
+        totflg = totflg .and. (.not. cnvflg(i))
       enddo
       if(totflg) return
-      
+      endif
 !!
 c
 c--- what would the change be, that a cloud with unit mass
@@ -2714,8 +3086,15 @@ c
       do i = 1, im
         if(asqecflg(i)) then
           indx = kb(i)
-          hcko(i,indx) = heo(i,indx)
-          qcko(i,indx) = qo(i,indx)
+!         if(cptrig(i)) then
+!           tem = 0.5*(buoyexcs(i,indx)+buoyexcs(i,indx+1))
+!           tem1 = tem / hvap
+!           hcko(i,indx) = heo(i,indx) + tem
+!           qcko(i,indx) = qo(i,indx) + tem1
+!         else
+            hcko(i,indx) = heo(i,indx)
+            qcko(i,indx) = qo(i,indx)
+!         endif
         endif
       enddo
       do k = 2, km1
@@ -2955,25 +3334,27 @@ c
 !  compute convective turn-over time
 !
 !> - Following Bechtold et al. (2008) \cite bechtold_et_al_2008, the convective adjustment time (dtconv) is set to be proportional to the convective turnover time, which is computed using the mean updraft velocity (wc) and the cloud depth. It is also proportional to the grid size (gdx).
-      do i = 1, im
-         if (cnvflg(i)) then
-            tem = zi(i,ktcon1(i)) - zi(i,kbcon1(i))
-            if (progomega) then
-               wc_eff = max(wc(i), wc_min)
-               dtconv(i) = tem / wc_eff
-            else
-               dtconv(i) = tem / wc(i)
-            endif
-         !grid spacing scaling (disabled for HWRF SAMF deep)
-            if (.not. hwrf_samfdeep) then
-               tfac = 1. + gdx(i) / 75000.
-               dtconv(i) = tfac * dtconv(i)
-            endif  
-         !bounds
-            dtconv(i) = max(dtconv(i), dtmin)
-            dtconv(i) = min(dtconv(i), dtmax)
-         endif
-      enddo
+      if(hwrf_samfdeep) then
+       do i= 1, im
+        if(cnvflg(i)) then
+          tem = zi(i,ktcon1(i)) - zi(i,kbcon1(i))
+          dtconv(i) = tem / wc(i)
+          dtconv(i) = max(dtconv(i),dtmin)
+          dtconv(i) = min(dtconv(i),dtmax)
+        endif
+       enddo
+      else
+       do i= 1, im
+        if(cnvflg(i)) then
+          tem = zi(i,ktcon1(i)) - zi(i,kbcon1(i))
+          dtconv(i) = tem / wc(i)
+          tfac = 1. + gdx(i) / 75000.
+          dtconv(i) = tfac * dtconv(i)
+          dtconv(i) = max(dtconv(i),dtmin)
+          dtconv(i) = min(dtconv(i),dtmax)
+        endif
+       enddo
+      endif
 !
 !> - Calculate advective time scale (tauadv) using a mean cloud layer wind speed.
       do i= 1, im
@@ -3000,7 +3381,7 @@ c
            umean(i) = max(umean(i), 1.)
            tauadv = gdx(i) / umean(i)
            advfac(i) = tauadv / dtconv(i)
-           advfac(i) = min(cat_adj_deep*advfac(i), 1.)
+           advfac(i) = min(advfac(i), 1.)
         endif
       enddo
       
@@ -3091,13 +3472,13 @@ c
         endif
       enddo
 !!
-
-!> - If the large scale destabilization is less than zero, or the stabilization by the convection is greater than zero, then the scheme returns to the calling routine without modifying the state variables.
+      if(.not.coldpool)then
       totflg = .true.
       do i=1,im
         totflg = totflg .and. (.not. cnvflg(i))
       enddo
       if(totflg) return
+      endif
 !!
 !
 !> - For scale-aware parameterization, the updraft fraction (sigmagfm) is first computed as a function of the lateral entrainment rate at cloud base (see Han et al.'s (2017) \cite han_et_al_2017 equation 4 and 5), following the study by Grell and Freitas (2014) \cite grell_and_freitas_2014.
@@ -3198,13 +3579,13 @@ c
             if(k <= ktcon(i)) then
               tem2   = xmb(i) * dt2
               dellat = (dellah(i,k) - hvap * dellaq(i,k)) / cp
-              new_t1(i,k) = t1(i,k) + tem2 * dellat
-              new_q1(i,k) = q1(i,k) + tem2 * dellaq(i,k)
+              t1(i,k) = t1(i,k) + tem2 * dellat
+              q1(i,k) = q1(i,k) + tem2 * dellaq(i,k)
 !             tem = tem2 / rcs(i)
 !             u1(i,k) = u1(i,k) + dellau(i,k) * tem
 !             v1(i,k) = v1(i,k) + dellav(i,k) * tem
-              new_u1(i,k) = u1(i,k) + tem2 * dellau(i,k)
-              new_v1(i,k) = v1(i,k) + tem2 * dellav(i,k)
+              u1(i,k) = u1(i,k) + tem2 * dellau(i,k)
+              v1(i,k) = v1(i,k) + tem2 * dellav(i,k)
               dp = 1000. * del(i,k)
               tem = xmb(i) * dp / grav
               delhbar(i) = delhbar(i) + tem * dellah(i,k)
@@ -3217,6 +3598,50 @@ c
         enddo
       enddo
 !
+!  compute change due to leonard term
+!
+      if(leonard) then
+!
+        do i = 1, im
+          if(cnvflg(i)) then
+            if(gdx(i) < dxcrtuf) then
+              tem = 1. - scaldfunc(i) * advfac(i)
+              tem1 = min(max(tem, 0.), 1.)
+              saleofac(i) = saleofac(i) * tem1
+            endif
+          endif
+        enddo
+!
+        do k = 2, km
+          do i = 1, im
+            if(cnvflg(i) .and. gdx(i) < dxcrtuf) then
+              if(zo(i,k) >= hpbl(i) .and.
+     &           (k > kb(i) .and. k <= ktcon(i))) then
+!             if(k > kb(i) .and. k < ktcon(i)) then
+!             if(k < ktcon(i)) then
+!             if(zo(i,k) > hpbl(i) .and.
+!    &           k < ktcon(i)) then
+!             if(k >= kbcon(i) .and. k < ktcon(i)) then
+                dz = zo(i,k+1) - zo(i,k-1)
+                tem = leo_t(i,k+1)-leo_t(i,k-1)
+                tem1 = saleofac(i) * tem / dz
+                t1(i,k) = t1(i,k) + tem1 * dt2
+                tem = leo_q(i,k+1,1)-leo_q(i,k-1,1)
+                tem1 = saleofac(i) * tem / dz
+                q1(i,k) = q1(i,k) + tem1 * dt2
+!               tem = leo_u(i,k+1)-leo_u(i,k-1)
+!               tem1 = saleofac(i) * tem / dz
+!               u1(i,k) = u1(i,k) + tem1 * dt2
+!               tem = leo_v(i,k+1)-leo_v(i,k-1)
+!               tem1 = saleofac(i) * tem / dz
+!               v1(i,k) = v1(i,k) + tem1 * dt2
+              endif
+            endif
+          enddo
+        enddo
+!
+      endif
+!
 ! Negative moisture is set to zero after borrowing it from
 !  positive values within the mass-flux transport layers
 !
@@ -3228,9 +3653,9 @@ c
       do k = 1,km1
         do i = 1,im
           if(cnvflg(i) .and. k <= ktcon(i)) then
-            tem = new_q1(i,k) * delp(i,k) / grav
-            if(new_q1(i,k) < 0.) tsumn(i) = tsumn(i) + tem
-            if(new_q1(i,k) > 0.) tsump(i) = tsump(i) + tem
+            tem = q1(i,k) * delp(i,k) / grav
+            if(q1(i,k) < 0.) tsumn(i) = tsumn(i) + tem
+            if(q1(i,k) > 0.) tsump(i) = tsump(i) + tem
           endif
         enddo
       enddo
@@ -3250,13 +3675,11 @@ c
           if(cnvflg(i) .and. k <= ktcon(i)) then
             if(rtnp(i) < 0.) then
               if(tsump(i) > abs(tsumn(i))) then
-                if(new_q1(i,k) < 0.) new_q1(i,k) = 0.
-                if(new_q1(i,k) > 0.) new_q1(i,k) =                      &
-     &            (1.+rtnp(i))*new_q1(i,k)
+                if(q1(i,k) < 0.) q1(i,k) = 0.
+                if(q1(i,k) > 0.) q1(i,k) = (1.+rtnp(i))*q1(i,k)
               else
-                if(new_q1(i,k) < 0.) new_q1(i,k) =                      &
-     &            (1.+rtnp(i))*new_q1(i,k)
-                if(new_q1(i,k) > 0.) new_q1(i,k) = 0.
+                if(q1(i,k) < 0.) q1(i,k) = (1.+rtnp(i))*q1(i,k)
+                if(q1(i,k) > 0.) q1(i,k) = 0.
               endif
             endif
           endif
@@ -3336,7 +3759,7 @@ c
         do k = 1, km
         do i = 1, im
           if(cnvflg(i) .and. k <= ktcon(i)) then
-            new_qtr(i,k,kk) = ctr(i,k,n)
+            qtr(i,k,kk) = ctr(i,k,n)
           endif
         enddo
         enddo
@@ -3366,16 +3789,15 @@ c
               if (cnvflg(i)) then
                 if(k > kb(i) .and. k < ktcon(i)) then
                   dp = 1000. * del(i,k)
-                  if (new_qtr(i,k,kk) < 0.) then
+                  if (qtr(i,k,kk) < 0.) then
 !   borrow negative mass from wet deposition
-                    tem = -new_qtr(i,k,kk)*dp
+                    tem = -qtr(i,k,kk)*dp
                     if(wet_dep(i,k,n) >= tem) then
                       wet_dep(i,k,n) = wet_dep(i,k,n) - tem
-                      new_qtr(i,k,kk) = 0.
+                      qtr(i,k,kk) = 0.
                     else
                       wet_dep(i,k,n) = 0.
-                      new_qtr(i,k,kk) = new_qtr(i,k,kk)+                &
-     &                                  wet_dep(i,k,n)/dp
+                      qtr(i,k,kk) = qtr(i,k,kk)+wet_dep(i,k,n)/dp
                     endif
                   endif
                 endif
@@ -3394,7 +3816,7 @@ c
         do i = 1, im
           if (cnvflg(i) .and. k <= kmax(i)) then
             if(k <= ktcon(i)) then
-              qeso(i,k) = 0.01 * fpvs(new_t1(i,k))      ! fpvs is in pa
+              qeso(i,k) = 0.01 * fpvs(t1(i,k))      ! fpvs is in pa
               qeso(i,k) = eps * qeso(i,k)/(pfld(i,k) + epsm1*qeso(i,k))
               val     =             1.e-8
               qeso(i,k) = max(qeso(i,k), val )
@@ -3445,8 +3867,8 @@ c
 !             evef = edt(i) * evfact
 !             if(islimsk(i) == 1) evef=edt(i) * evfactl
 !             if(islimsk(i) == 1) evef=.07
-              qcond(i) = evef * (new_q1(i,k) - qeso(i,k))
-     &                 / (1. + el2orc * qeso(i,k) / new_t1(i,k)**2)
+              qcond(i) = evef * (q1(i,k) - qeso(i,k))
+     &                 / (1. + el2orc * qeso(i,k) / t1(i,k)**2)
               dp = 1000. * del(i,k)
               tem = grav / dp
               tem1 = dp / grav
@@ -3461,8 +3883,8 @@ c
                 flg(i) = .false.
               endif
               if(rn(i) > 0. .and. qevap(i) > 0.) then
-                new_q1(i,k) = new_q1(i,k) + qevap(i)
-                new_t1(i,k) = new_t1(i,k) - elocp * qevap(i)
+                q1(i,k) = q1(i,k) + qevap(i)
+                t1(i,k) = t1(i,k) - elocp * qevap(i)
                 rn(i) = rn(i) - .001 * qevap(i) * tem1
                 deltv(i) = - elocp*qevap(i)/dt2
                 delq(i) =  + qevap(i)/dt2
@@ -3475,7 +3897,40 @@ c
         enddo
       enddo
 
-!LB:                                                                                                                                                                                                                                                  
+!
+! update the downdraft buoyancy excess in cold pool parameterization
+!
+      if(coldpool) then
+!
+        do k = 1, km1
+          do i = 1, im
+            if(cnvflg(i) .and. rn(i) <= 0.) then
+              dellabu(i,k) = 0.
+            endif
+          enddo
+        enddo
+        do k = 1, km1
+          do i = 1, im
+            if(cnvflg(i) .and. rn(i) > 0.) then
+              if(k < jmin(i)) then
+                dellabu(i,k) = -cpfac * dellabu(i,k) * xmb(i)
+                dellabu(i,k) = max(dellabu(i,k), 0.)
+              endif
+            endif
+          enddo
+        enddo
+!
+        do k = 1, km1
+          do i = 1, im
+            tem = buoyexcs(i,k) + dellabu(i,k) * dt2
+            ptem = 1. + dt2 / taucp
+            buoyexcs(i,k) = tem / ptem
+          enddo
+        enddo
+!
+      endif
+!
+!LB:
       if(do_ca)then
          do i = 1,im
             rainevap(i)=delqev(i)
@@ -3486,6 +3941,8 @@ cj
 !     if(me == 31 .and. cnvflg(i)) then
 !     if(cnvflg(i)) then
 !       if(i==1) print*,'ntr:ntk= ',ntr,ntk
+!       if(i==1) print*,'itc:ntc= ',itc,ntc
+!       print*,'buoyexcs= ',buoyexcs(i,1)
 !       print *, ' deep delhbar, delqbar, deltbar = ',
 !    &             delhbar(i),hvap*delqbar(i),cp*deltbar(i)
 !       print *, ' deep delebar ozone = ',delebar(i,1)
@@ -3511,6 +3968,7 @@ c
             rn(i) = 0.
           else
             ktop(i) = ktcon(i)
+            kcnvtop(i) = ktop(i)
             kbot(i) = kbcon(i)
             kcnv(i) = 1
             cldwrk(i) = aa1(i)
@@ -3560,12 +4018,12 @@ c
 !           if (k > kb(i) .and. k <= ktcon(i)) then
             if (k >= kbcon(i) .and. k <= ktcon(i)) then
               tem  = dellal(i,k) * xmb(i) * dt2
-              tem1 = max(0.0, min(1.0, (tcr-new_t1(i,k))*tcrf))
-              if (new_qtr(i,k,2) > -999.0) then
-                new_qtr(i,k,1) = new_qtr(i,k,1) + tem * tem1            ! ice
-                new_qtr(i,k,2) = new_qtr(i,k,2) + tem *(1.0-tem1)       ! water
+              tem1 = max(0.0, min(1.0, (tcr-t1(i,k))*tcrf))
+              if (qtr(i,k,2) > -999.0) then
+                qtr(i,k,1) = qtr(i,k,1) + tem * tem1            ! ice
+                qtr(i,k,2) = qtr(i,k,2) + tem *(1.0-tem1)       ! water
               else
-                new_qtr(i,k,1) = new_qtr(i,k,1) + tem
+                qtr(i,k,1) = qtr(i,k,1) + tem
               endif
             endif
           endif
@@ -3579,10 +4037,10 @@ c
         do i = 1, im
           if(cnvflg(i) .and. rn(i) <= 0.) then
             if (k <= kmax(i)) then
-              new_t1(i,k) = to(i,k)
-              new_q1(i,k) = qo(i,k)
-              new_u1(i,k) = uo(i,k)
-              new_v1(i,k) = vo(i,k)
+              t1(i,k) = to(i,k)
+              q1(i,k) = qo(i,k)
+              u1(i,k) = uo(i,k)
+              v1(i,k) = vo(i,k)
             endif
           endif
         enddo
@@ -3594,7 +4052,7 @@ c
         do i = 1, im
           if(cnvflg(i) .and. rn(i) <= 0.) then
             if (k <= kmax(i)) then
-              new_qtr(i,k,kk)= ctro(i,k,n)
+              qtr(i,k,kk)= ctro(i,k,n)
             endif
           endif
         enddo
@@ -3620,7 +4078,7 @@ c
 !         do k = 1, km
 !           do i = 1, im
 !             if(cnvflg(i) .and. rn(i) > 0.) then
-!               if (k <= kmax(i)) new_qtr(i,k,kk) = qaero(i,k,n)
+!               if (k <= kmax(i)) qtr(i,k,kk) = qaero(i,k,n)
 !             endif
 !           enddo
 !         enddo
@@ -3670,14 +4128,14 @@ c
           if(cnvflg(i) .and. rn(i) > 0.) then
             if(k > kb(i) .and. k < ktop(i)) then
               tem = 0.5 * (eta(i,k-1) + eta(i,k)) * xmb(i)
-              tem1 = pfld(i,k) * 100. / (rd * new_t1(i,k))
+              tem1 = pfld(i,k) * 100. / (rd * t1(i,k))
               if(progsigma)then
                 tem2 = sigmab(i)
               else
                 tem2 = max(sigmagfm(i), betaw)
               endif
               ptem = tem / (tem2 * tem1)
-              new_qtr(i,k,ntk)=new_qtr(i,k,ntk)+0.5*tem2*ptem*ptem
+              qtr(i,k,ntk)=qtr(i,k,ntk)+0.5*tem2*ptem*ptem
             endif
           endif
         enddo
@@ -3688,14 +4146,14 @@ c
           if(cnvflg(i) .and. rn(i) > 0.) then
             if(k > 1 .and. k <= jmin(i)) then
               tem = 0.5*edto(i)*(etad(i,k-1)+etad(i,k))*xmb(i)
-              tem1 = pfld(i,k) * 100. / (rd * new_t1(i,k))
+              tem1 = pfld(i,k) * 100. / (rd * t1(i,k))
               if(progsigma)then
                 tem2 = sigmab(i)
               else
                 tem2 = max(sigmagfm(i), betaw)
               endif
               ptem = tem / (tem2 * tem1)
-              new_qtr(i,k,ntk)=new_qtr(i,k,ntk)+0.5*tem2*ptem*ptem
+              qtr(i,k,ntk)=qtr(i,k,ntk)+0.5*tem2*ptem*ptem
             endif
           endif
         enddo
@@ -3706,10 +4164,10 @@ c
       if(mp_phys == mp_phys_mg) then
         do k=1,km
           do i=1,im
-            QLCN(i,k)     = new_qtr(i,k,2) - qlcn(i,k)
-            QICN(i,k)     = new_qtr(i,k,1) - qicn(i,k)
+            QLCN(i,k)     = qtr(i,k,2) - qlcn(i,k)
+            QICN(i,k)     = qtr(i,k,1) - qicn(i,k)
             cf_upi(i,k)   = cnvc(i,k)
-            w_upi(i,k)    = ud_mf(i,k)*new_t1(i,k)*rd /
+            w_upi(i,k)    = ud_mf(i,k)*t1(i,k)*rd /
      &                     (dt2*max(sigmagfm(i),1.e-12)*prslp(i,k))
             CNV_MFD(i,k)  = ud_mf(i,k)/dt2
             CLCN(i,k)     = cnvc(i,k)
@@ -3719,12 +4177,27 @@ c
         enddo
       endif
       endif ! (.not.hwrf_samfdeep)
-
-      ten_t = (new_t1 - t1)/delt
-      ten_q(:,:,1) = (new_q1 - q1)/delt
-      ten_u = (new_u1 - u1)/delt 
-      ten_v = (new_v1 - v1)/delt
-      dqtr  = (new_qtr - qtr)/delt
+!     if(coldpool)then
+!       print*,'buoyexcs_max= ',maxval(buoyexcs)
+!       print*,'buoyexcs_min= ',minval(buoyexcs)
+!     endif
+!
+!     if(coldpool)then
+!
+!       do k = 1,km
+!         do i = 1,im
+!           aux3d(i,k,1) = buoyexcs(i,k)
+!         enddo
+!       enddo
+!
+!       i=im/2
+!       if(cptrig(i)) then
+!       do k = 1,kdcp(i)
+!         print*,'z:buex= ',zo(i,k),buoyexcs(i,k)
+!       enddo
+!       endif
+!
+!     endif
 
       return
       end subroutine samfdeepcnv_run
