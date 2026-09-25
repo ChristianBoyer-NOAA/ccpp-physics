@@ -55,11 +55,13 @@
      &     t0c,delt,ntk,ntr,delp,first_time_step,restart,               & 
      &     tmf,qmicro,progsigma,progomega,                              &
      &     prslp,psp,phil,tkeh,qtr,dqtr,prevsq,q,q1,t1,u1,v1,fscav,     &
+!The following variables are for Leonard term
+     &     leo_u,leo_v,leo_t,leo_q,leonard,leofac,                      &
      &     rn,kbot,ktop,kcnv,islimsk,garea,cscale,ten_t, ten_u, ten_v,  &
      &     ten_q, dot,ncloud,hpbl,ud_mf,dt_mf,cnvw,cnvc,                &
      &     clam,c0s,c1,evef,pgcon,asolfac,hwrf_samfshal,                & 
      &     sigmain,sigmaout,omegain,omegaout,betadcu,betamcu,betascu,   &
-     &     lbb1,lbb2,lbb3,dt_decay,cat_adj_shal,errmsg,errflg)
+     &     cat_adj_shal,errmsg,errflg)
 !
       use machine , only : kind_phys
       use funcphys , only : fpvs
@@ -70,7 +72,7 @@
       integer, intent(in)  :: islimsk(:)
       real(kind=kind_phys), intent(in) :: cliq, cp, cvap,               &
      &   eps, epsm1, fv, grav, hvap, rd, rv, t0c, betascu, betadcu,     &
-     &   betamcu, lbb1, lbb2, lbb3, dt_decay
+     &   betamcu
       real(kind=kind_phys), intent(in) ::  delt, cscale
       real(kind=kind_phys), intent(in) :: psp(:), delp(:,:),            &
      &   prslp(:,:), garea(:), hpbl(:), dot(:,:), phil(:,:),            &
@@ -81,7 +83,6 @@
      &     omegain(:,:)
 !
       real(kind=kind_phys), dimension(:), intent(in) :: fscav
-      integer, intent(inout)  :: kcnv(:)
       ! DH* TODO - check dimensions of qtr, ntr+2 correct?  *DH
       real(kind=kind_phys), intent(inout) :: tkeh(:,:)
       real(kind=kind_phys), intent(in) ::   qtr(:,:,:),                 &
@@ -89,11 +90,18 @@
 
       real(kind=kind_phys), intent(in) :: t1(:,:), u1(:,:), v1(:,:)
 !
-      integer, intent(out) :: kbot(:), ktop(:)
-      real(kind=kind_phys), intent(out) :: rn(:),                       &
-     &   cnvw(:,:), cnvc(:,:), dt_mf(:,:)
+! for Leonard term
+      logical, intent(in)  :: leonard !flag for leonard term
+      real(kind=kind_phys), intent(in) :: leofac  !parameter for Leonard term
+      real(kind=kind_phys), intent(in) ::
+     &                     leo_u(:,:),  leo_v(:,:),                     &
+     &                     leo_t(:,:),  leo_q(:,:,:)
 !
-      real(kind=kind_phys), intent(out) :: ud_mf(:,:)
+      integer, intent(inout) :: kbot(:), ktop(:), kcnv(:)
+      real(kind=kind_phys), intent(out) :: rn(:)
+      real(kind=kind_phys), intent(inout) :: cnvw(:,:), cnvc(:,:),      &
+     &               ud_mf(:,:), dt_mf(:,:)
+!
       real(kind=kind_phys), intent(inout), optional :: sigmaout(:,:),   &
      &   omegaout(:,:)
 
@@ -217,8 +225,7 @@ c  local variables and arrays
 c  variables for tracer wet deposition,
       real(kind=kind_phys), dimension(im,km,ntc) :: chem_c, chem_pw,
      &  wet_dep
- ! wet scavenging efficiency
-      real(kind=kind_phys), parameter :: escav   = 0.8
+      real(kind=kind_phys), parameter :: escav   = 0.8 ! wet scavenging efficiency
 !
 !  for updraft velocity calculation
       real(kind=kind_phys) wu2(im,km),     buo(im,km),    drag(im,km),
@@ -242,6 +249,12 @@ c  cloud water
      &                     zi(im,km),      pwo(im,km),    c0t(im,km),
      &                     sumx(im),       tx1(im),       cnvwt(im,km)
      &,                    rhbar(im)
+!
+!    parameters for leonard term
+      real(kind=kind_phys) leodx1,leodx2,leodx3,leodx4
+      real(kind=kind_phys) saleofac(im)
+!     parameter(leodx1=20000.,leodx2=1500.,leodx3=500.,leodx4=50.)
+      parameter(leodx1=20000.,leodx2=2000.,leodx3=500.,leodx4=50.)
 !
 !  variables for Total Variation Diminishing (TVD) flux-limiter scheme
 !     on environmental subsidence and uplifting
@@ -363,6 +376,7 @@ c
         advfac(i) = 0.
         gdx(i) = sqrt(garea(i))
         xmb(i) = 0.
+        saleofac(i) = 0.
           scaldfunc(i)=-1.0  ! wang initialized
           sigmagfm(i)=-1.0
        enddo
@@ -388,17 +402,36 @@ c
 !       vshear(i) = 0.
         gdx(i) = sqrt(garea(i))
         xmb(i) = 0.
+        saleofac(i) = 0.
        enddo
+      endif
+!
+!>  - Compute scale dependent leonard factor (\p saleofac)
+!
+      if(leonard) then
+        do i=1,im
+          if(gdx(i) >= leodx1 .or. gdx(i) <= leodx4) then
+            saleofac(i) = 0.
+          else if(gdx(i) < leodx1 .and. gdx(i) > leodx2) then
+!           tem = leodx2 / gdx(i)
+            tem = (leodx2 / gdx(i))**2.0
+            saleofac(i) = leofac * tem
+          else if(gdx(i) < leodx3 .and. gdx(i) > leodx4) then
+!           tem = gdx(i) / leodx3
+            tem = (gdx(i) / leodx3)**2.0
+            saleofac(i) = leofac * tem
+          else if(gdx(i) < leodx2 .and. gdx(i) > leodx3) then
+            saleofac(i) = leofac
+          endif
+        enddo
       endif
 !!      
 !>  - Return to the calling routine if deep convection is present or the surface buoyancy flux is negative.
-      if (.not. progomega) then
-         totflg = .true.
-         do i=1,im
-            totflg = totflg .and. (.not. cnvflg(i))
-         enddo
-         if(totflg) return
-      endif
+      totflg = .true.
+      do i=1,im
+        totflg = totflg .and. (.not. cnvflg(i))
+      enddo
+      if(totflg) return
 !!
 !>  - determine aerosol-aware rain conversion parameter over land
       do i=1,im
@@ -431,22 +464,6 @@ c
         enddo
       enddo
 !
-!>  - Initialize convective cloud water and cloud cover to zero.
-      do k = 1, km
-        do i = 1, im
-          cnvw(i,k) = 0.
-          cnvc(i,k) = 0.
-        enddo
-      enddo
-! hchuang code change
-!>  - Initialize updraft mass fluxes to zero.
-      do k = 1, km
-        do i = 1, im
-          ud_mf(i,k) = 0.
-          dt_mf(i,k) = 0.
-        enddo
-      enddo
-c
       dt2   = delt
 !
 c  model tunable parameters are all here
@@ -749,13 +766,11 @@ c
       enddo
 !!
 !> - If no LFC, return to the calling routine without modifying state variables.
-      if (.not. progomega) then
-         totflg = .true.
-         do i=1,im
-            totflg = totflg .and. (.not. cnvflg(i))
-         enddo
-         if(totflg) return
-      endif
+      totflg = .true.
+      do i=1,im
+        totflg = totflg .and. (.not. cnvflg(i))
+      enddo
+      if(totflg) return
 !!
 !> - Determine the vertical pressure velocity at the LFC. After Han and Pan (2011) \cite han_and_pan_2011 , determine the maximum pressure thickness between a parcel's starting level and the LFC. If a parcel doesn't reach the LFC within the critical thickness, then the convective inhibition is deemed too great for convection to be triggered, and the subroutine returns to the calling routine without modifying the state variables.
       do i=1,im
@@ -804,13 +819,11 @@ c
         endif
       enddo
 !!
-      if (.not. progomega) then
-         totflg = .true.
-         do i=1,im
-            totflg = totflg .and. (.not. cnvflg(i))
-         enddo
-         if(totflg) return
-      endif
+      totflg = .true.
+      do i=1,im
+        totflg = totflg .and. (.not. cnvflg(i))
+      enddo
+      if(totflg) return
 !
 ! re-define kb & kbcon
 !
@@ -852,13 +865,11 @@ c
         endif
       enddo
 !!
-      if (.not. progomega) then
-         totflg = .true.
-         do i=1,im
-            totflg = totflg .and. (.not. cnvflg(i))
-         enddo
-         if(totflg) return
-      endif
+      totflg = .true.
+      do i=1,im
+        totflg = totflg .and. (.not. cnvflg(i))
+      enddo
+      if(totflg) return
 !!
       do i=1,im
         if(cnvflg(i)) then
@@ -893,14 +904,11 @@ c
         endif
       enddo
 !!
-
-      if (.not. progomega) then
-         totflg = .true.
-         do i=1,im
-            totflg = totflg .and. (.not. cnvflg(i))
-         enddo
-         if(totflg) return
-      endif
+      totflg = .true.
+      do i=1,im
+        totflg = totflg .and. (.not. cnvflg(i))
+      enddo
+      if(totflg) return
 !!
 !
 ! turbulent entrainment rate assumed to be proportional
@@ -1197,13 +1205,11 @@ c
         endif
       enddo
 !!
-      if (.not. progomega) then
-         totflg = .true.
-         do i = 1, im
-            totflg = totflg .and. (.not. cnvflg(i))
-         enddo
-         if(totflg) return
-      endif
+      totflg = .true.
+      do i = 1, im
+        totflg = totflg .and. (.not. cnvflg(i))
+      enddo
+      if(totflg) return
 !!
 c
 c  calculate convective inhibition
@@ -1274,13 +1280,11 @@ c
        enddo
       endif
 !!
-      if (.not. progomega) then
-         totflg = .true.
-         do i=1,im
-            totflg = totflg .and. (.not. cnvflg(i))
-         enddo
-         if(totflg) return
-      endif
+      totflg = .true.
+      do i=1,im
+        totflg = totflg .and. (.not. cnvflg(i))
+      enddo
+      if(totflg) return
 !!
 c
 c  determine first guess cloud top as the level of zero buoyancy
@@ -1454,15 +1458,12 @@ c
         if(cnvflg(i) .and. aa1(i) <= 0.) cnvflg(i) = .false.
       enddo
 !!
-!     > - If the updraft cloud work function is negative, convection does not occur, and the scheme returns to the calling routine.
-
-      if (.not. progomega) then
-         totflg = .true.
-         do i=1,im
-            totflg = totflg .and. (.not. cnvflg(i))
-         enddo
-         if(totflg) return
-      endif
+!> - If the updraft cloud work function is negative, convection does not occur, and the scheme returns to the calling routine.
+      totflg = .true.
+      do i=1,im
+        totflg = totflg .and. (.not. cnvflg(i))
+      enddo
+      if(totflg) return
 !!
 c
 c  estimate the onvective overshooting as the level
@@ -1573,7 +1574,7 @@ c
       if (progomega) then
          call progomega_calc(first_time_step,restart,im,km,
      &        kbcon1,ktcon,omegain,delt,del,zi,cnvflg,omegaout,
-     &        grav,buo,drag,wush,lbb1,lbb2,lbb3,dt_decay)
+     &        grav,buo,drag,wush,bb1,bb2)
          do k = 1, km
             do i = 1, im
                if (cnvflg(i)) then
@@ -2207,6 +2208,49 @@ c
           endif
         enddo
       enddo
+!
+!  compute change due to leonard term
+!
+      if(leonard) then
+!
+        do i = 1, im
+          if(cnvflg(i)) then
+            if(gdx(i) < dxcrt) then
+              tem = 1. - scaldfunc(i) * advfac(i)
+              tem1 = min(max(tem, 0.), 1.)
+              saleofac(i) = saleofac(i) * tem1
+            endif
+          endif
+        enddo
+!
+        do k = 2, km
+          do i = 1, im
+            if(cnvflg(i) .and. gdx(i) < dxcrt) then
+              if(zo(i,k) >= hpbl(i) .and.
+     &           (k > kb(i) .and. k <= ktcon(i))) then
+!             if(zo(i,k) > hpbl(i) .and.
+!    &           (k > kb(i) .and. k < ktcon(i))) then
+!             if(k > kb(i) .and. k < ktcon(i)) then
+!             if(k >= kbcon(i) .and. k < ktcon(i)) then
+                dz = zo(i,k+1) - zi(i,k-1)
+                tem = leo_t(i,k+1)-leo_t(i,k-1)
+                tem1 = saleofac(i) * tem / dz
+                new_t1(i,k) = new_t1(i,k) + tem1 * dt2
+                tem = leo_q(i,k+1,1)-leo_q(i,k-1,1)
+                tem1 = saleofac(i) * tem / dz
+                new_q1(i,k) = new_q1(i,k) + tem1 * dt2
+!               tem = leo_u(i,k+1)-leo_u(i,k-1)
+!               tem1 = saleofac(i) * tem / dz
+!               new_u1(i,k) = new_u1(i,k) + tem1 * dt2
+!               tem = leo_v(i,k+1)-leo_v(i,k-1)
+!               tem1 = saleofac(i) * tem / dz
+!               new_v1(i,k) = new_v1(i,k) + tem1 * dt2
+              endif
+            endif
+          enddo
+        enddo
+!
+      endif
 !
 ! Negative moisture is set to zero after borrowing it from
 !   positive values within the mass-flux transport layers
